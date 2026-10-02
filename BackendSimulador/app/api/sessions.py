@@ -1,12 +1,13 @@
 """API REST de sesiones de llamada.
 
 Flujo:
-1. POST /api/sessions                    -> crea la sesión (motor + persona)
+1. POST /api/sessions                    -> crea la sesión (motor + tipo de llamada; el backend elige el cliente)
 2. Conexión, según el motor de la sesión:
    - openai: POST /api/sessions/{id}/connect -> body: oferta SDP; respuesta: SDP de OpenAI (WebRTC)
    - gemini: POST /api/sessions/{id}/token   -> token efímero + URL del WebSocket de Gemini
    A partir de acá el audio va directo navegador <-> proveedor.
-3. DELETE /api/sessions/{id}             -> marca la llamada como finalizada
+3. POST /api/sessions/{id}/report       -> cierra la llamada y devuelve el informe con la evaluación
+   (DELETE /api/sessions/{id} cierra sin informe)
 """
 
 from collections.abc import Iterator
@@ -16,8 +17,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.ai.session_config import gemini_client_setup
 from app.config import Settings, get_settings
+from app.models.reports import CallReport, ReportRequest
 from app.models.sessions import GeminiConnectInfo, SessionCreate, SessionInfo
 from app.providers.errors import ProviderError
+from app.scenarios.catalog import ScenarioNotFound
 from app.sessions.manager import EngineUnavailable, InvalidSessionState, SessionManager, SessionNotFound
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -31,10 +34,16 @@ def get_manager(request: Request) -> SessionManager:
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_session(body: SessionCreate | None = None, manager: SessionManager = Depends(get_manager)) -> SessionInfo:
+    """Crea una llamada con el cliente indicado (`scenario_id`) o con uno al azar del tipo pedido."""
+    body = body or SessionCreate()
     try:
-        return SessionInfo.from_session(manager.create(body.engine if body else None))
-    except EngineUnavailable as exc:
+        session = manager.create(body.engine, body.direction, body.dialed_number, body.scenario_id)
+    except (EngineUnavailable, InvalidSessionState) as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+    except ScenarioNotFound as exc:
+        code = status.HTTP_404_NOT_FOUND if body.scenario_id else status.HTTP_503_SERVICE_UNAVAILABLE
+        raise HTTPException(code, str(exc)) from None
+    return SessionInfo.from_session(session)
 
 
 @router.get("/{session_id}")
@@ -80,6 +89,24 @@ async def connect_gemini(
 def end_session(session_id: str, manager: SessionManager = Depends(get_manager)) -> SessionInfo:
     with _translate_errors():
         return SessionInfo.from_session(manager.end(session_id))
+
+
+@router.post("/{session_id}/report")
+async def create_report(
+    session_id: str, body: ReportRequest, manager: SessionManager = Depends(get_manager)
+) -> CallReport:
+    """Cierra la llamada y arma el informe: métricas del softphone + evaluación con IA de la transcripción."""
+    with _translate_errors():
+        return await manager.build_report(session_id, body)
+
+
+@router.get("/{session_id}/report")
+def get_report(session_id: str, manager: SessionManager = Depends(get_manager)) -> CallReport:
+    with _translate_errors():
+        report = manager.get(session_id).report
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "La llamada todavía no tiene informe.")
+    return report
 
 
 @contextmanager

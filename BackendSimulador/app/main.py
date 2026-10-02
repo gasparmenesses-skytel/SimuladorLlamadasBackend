@@ -5,9 +5,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-from app.api import health, sessions
+from app.api import health, media, scenarios, sessions
 from app.config import get_settings
+from app.evaluation.evaluator import Evaluator
 from app.providers.gemini_live import GeminiLiveClient
 from app.providers.openai_live import OpenAILiveClient
 from app.sessions.manager import SessionManager
@@ -29,14 +31,15 @@ async def lifespan(app: FastAPI):
         if settings.gemini_api_key
         else None
     )
-    app.state.session_manager = SessionManager(settings, openai_client, gemini_client)
+    evaluator = Evaluator(settings)
+    app.state.session_manager = SessionManager(settings, openai_client, gemini_client, evaluator)
     logging.getLogger(__name__).info(
         "Motores disponibles: %s (por defecto: %s)",
         ", ".join(settings.available_engines),
         settings.voice_engine,
     )
     yield
-    for client in (openai_client, gemini_client):
+    for client in (openai_client, gemini_client, evaluator):
         if client:
             await client.aclose()
 
@@ -53,6 +56,11 @@ if settings.cors_origins:
 
 app.include_router(health.router)
 app.include_router(sessions.router)
+app.include_router(scenarios.router)
+app.include_router(media.router)
+
+if media.MEDIA_DIR.is_dir():
+    app.mount(media.MEDIA_URL, StaticFiles(directory=media.MEDIA_DIR), name="media")
 
 if settings.enable_dev_client:
 

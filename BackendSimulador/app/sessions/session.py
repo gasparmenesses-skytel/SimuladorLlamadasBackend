@@ -1,9 +1,13 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
-from app.ai.persona import Persona
 from app.config import VoiceEngine
+from app.scenarios.catalog import Scenario
+
+if TYPE_CHECKING:
+    from app.models.reports import CallReport
 
 
 class SessionStatus(StrEnum):
@@ -22,10 +26,13 @@ def utcnow() -> datetime:
 class CallSession:
     id: str
     engine: VoiceEngine
-    persona: Persona
+    scenario: Scenario
+    # Llamadas salientes: el número que marcó el operador (solo informativo).
+    dialed_number: str | None = None
     status: SessionStatus = SessionStatus.CREATED
     provider_session_id: str | None = None
     created_at: datetime = field(default_factory=utcnow)
     connected_at: datetime | None = None
     ended_at: datetime | None = None
     error: str | None = None
+    report: "CallReport | None" = None

@@ -262,7 +262,7 @@ async function startCall() {
       body: JSON.stringify({ engine }),
     });
     call.sessionId = session.session_id;
-    log(`sesión ${session.session_id} (${session.engine}, ${session.persona})`);
+    log(`sesión ${session.session_id} (${session.engine}, ${session.scenario.customer.name})`);
 
     setStatus("Conectando…");
     if (engine === "openai") await connectOpenAI(); else await connectGemini();

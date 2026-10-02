@@ -1,0 +1,18 @@
+# Levanta el simulador completo: backend (FastAPI) + frontend (React servido por nginx).
+#   docker compose up --build
+# Frontend: http://localhost:3000 · Backend: http://localhost:8000
+include:
+  - BackendSimulador/docker-compose.yml
+
+services:
+  frontend:
+    build: ./FrontendSimulador
+    image: frontend-simulador
+    container_name: frontend-simulador
+    ports:
+      # Solo localhost: el micrófono del navegador exige localhost o HTTPS.
+      - "127.0.0.1:3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

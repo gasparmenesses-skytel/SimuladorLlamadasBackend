@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # Los tokens efímeros de la Live API están en v1alpha.
     gemini_api_version: str = "v1alpha"
 
+    # Modelos de texto que evalúan la llamada al terminar (se usa Gemini si hay key).
+    gemini_eval_model: str = "gemini-flash-latest"
+    openai_eval_model: str = "gpt-5.4-mini"
+    evaluation_timeout_seconds: float = 60.0
+
     # Timeout (segundos) para crear la sesión en el proveedor.
     provider_timeout_seconds: float = 15.0
     # Duración máxima de una llamada (Gemini: vida del token efímero).
