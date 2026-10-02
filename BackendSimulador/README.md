@@ -1,6 +1,6 @@
 # Backend Simulador de Llamadas
 
-Backend IA del simulador de entrenamiento para operadores bancarios. El operador habla por voz con una clienta virtual (María), que habla en español rioplatense con voseo.
+Backend IA del simulador de entrenamiento para operadores bancarios. El operador habla por voz con un cliente virtual que habla en español rioplatense. En cada llamada se elige al azar una de cuatro personas (María, Juan, Ana o Luis), cada una con su caso, su personalidad y su voz.
 
 Hay dos motores de voz intercambiables, para compararlos:
 
@@ -37,7 +37,7 @@ app/
 ├── api/                 # endpoints REST (health, sessions)
 ├── providers/           # integraciones: openai_live.py, gemini_live.py
 ├── ai/                  # persona y configuración de la sesión de voz por proveedor
-│   └── prompts/         # prompts de las personas (María)
+│   └── prompts/         # prompts de las personas (María, Juan, Ana, Luis)
 ├── sessions/            # CallSession + SessionManager (en memoria)
 └── models/              # schemas de la API
 dev_client/index.html    # cliente de prueba (NO es el frontend)
@@ -127,9 +127,9 @@ Al terminar, en los dos motores: `DELETE /api/sessions/{id}`.
 | Variable | Default | Descripción |
 |---|---|---|
 | `OPENAI_API_KEY` | — | Habilita el motor `openai`. |
-| `OPENAI_MODEL` / `OPENAI_VOICE` | `gpt-live-1` / `marin` | |
+| `OPENAI_MODEL` / `OPENAI_VOICE` | `gpt-live-1` / `marin` | La voz es la de respaldo: cada persona define la suya en `app/ai/persona.py`. |
 | `GEMINI_API_KEY` | — | Habilita el motor `gemini`. |
-| `GEMINI_MODEL` / `GEMINI_VOICE` | `gemini-3.8-live` / `Gacrux` | Otras voces femeninas: Kore, Sulafat, Aoede, Leda. |
+| `GEMINI_MODEL` / `GEMINI_VOICE` | `gemini-3.8-live` / `Gacrux` | Igual que en OpenAI: voz de respaldo si la persona no define una. |
 | `VOICE_ENGINE` | primero con key | Motor por defecto. |
 | `MAX_CALL_MINUTES` | `15` | Duración máxima de la llamada (Gemini: vida del token). |
 | `ENABLE_DEV_CLIENT` | `true` | Sirve `/dev`. |

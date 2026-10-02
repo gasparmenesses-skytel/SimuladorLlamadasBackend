@@ -21,7 +21,7 @@ def build_openai_session(settings: Settings, persona: Persona) -> dict[str, Any]
     return {
         "model": settings.openai_model,
         "instructions": persona.instructions,
-        "audio": {"output": {"voice": settings.openai_voice}},
+        "audio": {"output": {"voice": persona.openai_voice or settings.openai_voice}},
         "client": {
             "data_channel": {
                 "allowed_client_events": OPENAI_FRONTEND_ALLOWED_CLIENT_EVENTS,
@@ -38,7 +38,9 @@ def build_gemini_config(settings: Settings, persona: Persona) -> types.LiveConne
         system_instruction=persona.instructions,
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=settings.gemini_voice)
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                    voice_name=persona.gemini_voice or settings.gemini_voice
+                )
             )
         ),
         # Transcripciones de ambos lados, para mostrar y (más adelante) evaluar.

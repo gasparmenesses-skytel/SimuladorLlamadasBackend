@@ -63,7 +63,7 @@
       <span id="status">Cargando…</span>
     </div>
     <p class="hint">Usá auriculares: con parlantes la clienta se escucha a sí misma y se interrumpe sola.
-      Al conectar, atendé vos primero (“Banco, buenas tardes, habla…”).</p>
+      Mientras conecta suena el tono de llamada; cuando se corta, atendé vos primero (“Banco, buenas tardes, habla…”).</p>
     <div class="meters">
       <span>Operador</span><div class="meter"><div id="mic-level"></div></div>
       <span>Cliente</span><div class="meter"><div id="remote-level"></div></div>
@@ -95,6 +95,9 @@ const ENGINE_NAMES = { openai: "OpenAI GPT-Live", gemini: "Gemini Live" };
 const TURN_GAP_MS = 1500;
 // Umbrales de nivel (RMS) para la medición aproximada de latencia.
 const MIC_THRESHOLD = 0.02, REMOTE_THRESHOLD = 0.01;
+// Tono de llamada "tu tuu" mientras conecta: 425 Hz, como el de las líneas rioplatenses.
+const RING_HZ = 425, RING_GAIN = 0.15, RING_PERIOD_MS = 2300;
+const RING_BEEPS = [[0, 0.18], [0.3, 0.55]]; // [inicio, duración] en segundos: "tu" corto y "tuu" largo
 
 let call = null;
 
@@ -139,6 +142,7 @@ function closeTurns() {
 }
 
 function onCallStarted() {
+  stopRing();
   const ms = Math.round(performance.now() - call.t0);
   setStatus(`En llamada (${ENGINE_NAMES[call.engine]}) — conectó en ${ms} ms. Atendé vos.`);
 }
@@ -184,6 +188,37 @@ function trackLatency(c, who, rms, now) {
   lat.remoteLastActive = now;
 }
 
+// Repite el "tu tuu" hasta que conecta. Al parar, el "tu tuu" en curso termina de sonar,
+// así siempre se escucha al menos uno completo aunque la conexión sea instantánea.
+function startRing(ctx) {
+  const ring = { timer: null };
+  (function cycle() {
+    const t0 = ctx.currentTime + 0.02;
+    for (const [start, duration] of RING_BEEPS) beep(ctx, t0 + start, duration);
+    ring.timer = setTimeout(cycle, RING_PERIOD_MS);
+  })();
+  return ring;
+}
+
+function beep(ctx, at, duration) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.frequency.value = RING_HZ;
+  // Rampas de 15 ms al empezar y terminar para que el pitido no haga "clic".
+  gain.gain.setValueAtTime(0, at);
+  gain.gain.linearRampToValueAtTime(RING_GAIN, at + 0.015);
+  gain.gain.setValueAtTime(RING_GAIN, at + duration - 0.015);
+  gain.gain.linearRampToValueAtTime(0, at + duration);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(at);
+  osc.stop(at + duration);
+}
+
+function stopRing() {
+  clearTimeout(call?.ring?.timer);
+  if (call) call.ring = null;
+}
+
 async function apiJson(url, options) {
   const resp = await fetch(url, options);
   if (!resp.ok) throw new Error(await errorDetail(resp));
@@ -213,6 +248,7 @@ async function startCall() {
     speakers: { operador: { el: null, lastEnd: -Infinity, closed: false }, cliente: { el: null, lastEnd: -Infinity, closed: false } },
     latency: { micLastActive: -Infinity, remoteLastActive: -Infinity, samples: [] },
   };
+  call.ring = startRing(call.audioCtx);
 
   try {
     call.mic = await navigator.mediaDevices.getUserMedia({
@@ -252,6 +288,7 @@ async function hangUp() {
 async function endCall(message, isError = false) {
   if (!call || call.ending) return;
   call.ending = true;
+  stopRing(); // si sigue sonando, se apaga al cerrar audioCtx
   const { pc, ws, mic, audioCtx, playCtx, sessionId } = call;
   pc?.close();
   if (ws && ws.readyState <= WebSocket.OPEN) ws.close(1000, "fin de llamada");
