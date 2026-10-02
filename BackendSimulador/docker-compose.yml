@@ -1,0 +1,29 @@
+services:
+  backend:
+    build: .
+    image: backend-simulador
+    container_name: backend-simulador
+    # Las variables (incluida OPENAI_API_KEY) se leen de .env en tiempo de ejecución;
+    # el archivo nunca se copia dentro de la imagen (ver .dockerignore).
+    env_file: .env
+    ports:
+      # Solo localhost: el micrófono en el navegador exige localhost o HTTPS,
+      # y no exponemos a la red un endpoint que consume la API key.
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # Desarrollo: `docker compose up --watch` sincroniza cambios sin reconstruir.
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./app
+          target: /srv/app
+        - action: sync
+          path: ./dev_client
+          target: /srv/dev_client
+        - action: rebuild
+          path: requirements.txt

@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cliente de prueba</title>
+<!--
+  Cliente de prueba del Backend Simulador. NO es el frontend del proyecto:
+  solo sirve para validar y comparar la conversación de voz.
+  - openai: WebRTC directo con OpenAI GPT-Live.
+  - gemini: WebSocket directo con Gemini Live (token efímero emitido por el backend).
+-->
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #1d2330; --muted: #677085; --border: #dde1e8;
+    --op: #2563eb; --cli: #c2410c; --ok: #15803d; --err: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b1f27; --text: #e6e9ef; --muted: #98a1b3; --border: #2c323d;
+      --op: #60a5fa; --cli: #fb923c; --ok: #4ade80; --err: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px; display: grid; gap: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  select { font: inherit; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  button { font: inherit; padding: 10px 20px; border-radius: 8px; border: 0; cursor: pointer; color: #fff; }
+  #call { background: var(--ok); }
+  #hangup { background: var(--err); }
+  button:disabled, select:disabled { opacity: .45; cursor: default; }
+  #status { color: var(--muted); }
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  .meters { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; margin-top: 12px; font-size: 13px; }
+  .meter { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .meter > div { height: 100%; width: 0; transition: width 60ms linear; }
+  #mic-level { background: var(--op); }
+  #remote-level { background: var(--cli); }
+  #latency { margin-top: 10px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #transcript { display: grid; gap: 8px; max-height: 50vh; overflow-y: auto; }
+  .turn { padding: 8px 12px; border-radius: 8px; border-left: 3px solid; background: var(--bg); }
+  .turn b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .turn.operador { border-color: var(--op); } .turn.operador b { color: var(--op); }
+  .turn.cliente { border-color: var(--cli); } .turn.cliente b { color: var(--cli); }
+  .empty { color: var(--muted); }
+  details summary { cursor: pointer; color: var(--muted); }
+  #log { font: 12px/1.5 ui-monospace, monospace; max-height: 240px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  #log .error { color: var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Simulador de llamadas — cliente de prueba</h1>
+
+  <section class="panel">
+    <div class="controls">
+      <select id="engine" aria-label="Motor de voz"></select>
+      <button id="call">Atender llamada</button>
+      <button id="hangup" disabled>Cortar</button>
+      <span id="status">Cargando…</span>
+    </div>
+    <p class="hint">Usá auriculares: con parlantes la clienta se escucha a sí misma y se interrumpe sola.
+      Al conectar, atendé vos primero (“Banco, buenas tardes, habla…”).</p>
+    <div class="meters">
+      <span>Operador</span><div class="meter"><div id="mic-level"></div></div>
+      <span>Cliente</span><div class="meter"><div id="remote-level"></div></div>
+    </div>
+    <div id="latency">Latencia de respuesta (aprox.): —</div>
+  </section>
+
+  <section class="panel">
+    <div id="transcript"><span class="empty">La transcripción aparece acá durante la llamada.</span></div>
+  </section>
+
+  <section class="panel">
+    <details>
+      <summary>Eventos</summary>
+      <div id="log"></div>
+    </details>
+  </section>
+
+  <audio id="remote-audio" autoplay></audio>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const engineSelect = $("engine"), callBtn = $("call"), hangupBtn = $("hangup"), statusEl = $("status");
+const transcriptEl = $("transcript"), logEl = $("log"), remoteAudio = $("remote-audio"), latencyEl = $("latency");
+
+const ENGINE_NAMES = { openai: "OpenAI GPT-Live", gemini: "Gemini Live" };
+// Si dos fragmentos del mismo hablante están separados por más que esto, se abre un turno nuevo (OpenAI).
+const TURN_GAP_MS = 1500;
+// Umbrales de nivel (RMS) para la medición aproximada de latencia.
+const MIC_THRESHOLD = 0.02, REMOTE_THRESHOLD = 0.01;
+
+let call = null;
+
+// ---------------------------------------------------------------- UI común
+
+function setStatus(text, isError = false) {
+  statusEl.textContent = text;
+  statusEl.style.color = isError ? "var(--err)" : "";
+}
+
+function log(text, isError = false) {
+  const line = document.createElement("div");
+  if (isError) line.className = "error";
+  const t = call ? ((performance.now() - call.t0) / 1000).toFixed(2) + "s " : "";
+  line.textContent = t + text;
+  logEl.append(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// OpenAI manda tiempos (start_ms/end_ms) y se agrupa por pausas; Gemini marca
+// el fin de cada turno y se agrupa con closeTurns().
+function appendTranscript(who, text, startMs, endMs) {
+  const speaker = call.speakers[who];
+  const newTurn = !speaker.el || (startMs !== undefined ? startMs - speaker.lastEnd > TURN_GAP_MS : speaker.closed);
+  if (newTurn) {
+    const turn = document.createElement("div");
+    turn.className = `turn ${who}`;
+    const label = document.createElement("b");
+    label.textContent = who === "operador" ? "Operador" : "Cliente";
+    speaker.el = document.createElement("span");
+    turn.append(label, speaker.el);
+    transcriptEl.append(turn);
+  }
+  speaker.el.textContent += text;
+  speaker.closed = false;
+  if (endMs !== undefined) speaker.lastEnd = endMs;
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function closeTurns() {
+  for (const speaker of Object.values(call.speakers)) speaker.closed = true;
+}
+
+function onCallStarted() {
+  const ms = Math.round(performance.now() - call.t0);
+  setStatus(`En llamada (${ENGINE_NAMES[call.engine]}) — conectó en ${ms} ms. Atendé vos.`);
+}
+
+// Medidor de nivel + latencia aproximada: tiempo entre que el operador deja de
+// hablar y la clienta empieza a sonar. Con auriculares el micrófono no capta a
+// la clienta, así que ambos niveles son independientes.
+function attachMeter(ctx, sourceNode, who) {
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  sourceNode.connect(analyser);
+  const data = new Float32Array(analyser.fftSize);
+  const bar = who === "operador" ? $("mic-level") : $("remote-level");
+  const ownCall = call;
+  (function tick() {
+    if (ownCall.ending) return;
+    analyser.getFloatTimeDomainData(data);
+    const rms = Math.sqrt(data.reduce((sum, v) => sum + v * v, 0) / data.length);
+    bar.style.width = Math.min(100, rms * 400) + "%";
+    trackLatency(ownCall, who, rms, performance.now());
+    requestAnimationFrame(tick);
+  })();
+}
+
+function trackLatency(c, who, rms, now) {
+  const lat = c.latency;
+  if (who === "operador") {
+    if (rms > MIC_THRESHOLD) lat.micLastActive = now;
+    return;
+  }
+  if (rms <= REMOTE_THRESHOLD) return;
+  const remoteWasQuiet = now - lat.remoteLastActive > 700;
+  const operatorSpokeLast = lat.micLastActive > lat.remoteLastActive;
+  const gap = now - lat.micLastActive;
+  // gap < 150 ms: la clienta habló encima (acompañamiento o interrupción), no es una respuesta.
+  if (remoteWasQuiet && operatorSpokeLast && gap >= 150 && gap < 8000) {
+    lat.samples.push(gap);
+    const sorted = [...lat.samples].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    latencyEl.textContent =
+      `Latencia de respuesta (aprox.): última ${Math.round(gap)} ms · mediana ${Math.round(median)} ms (n=${lat.samples.length})`;
+  }
+  lat.remoteLastActive = now;
+}
+
+async function apiJson(url, options) {
+  const resp = await fetch(url, options);
+  if (!resp.ok) throw new Error(await errorDetail(resp));
+  return resp.json();
+}
+
+async function errorDetail(resp) {
+  try { return (await resp.json()).detail || `HTTP ${resp.status}`; } catch { return `HTTP ${resp.status}`; }
+}
+
+// ---------------------------------------------------------------- Ciclo de la llamada
+
+async function startCall() {
+  const engine = engineSelect.value;
+  callBtn.disabled = engineSelect.disabled = true;
+  transcriptEl.replaceChildren();
+  logEl.replaceChildren();
+  latencyEl.textContent = "Latencia de respuesta (aprox.): —";
+  setStatus("Pidiendo micrófono…");
+  call = {
+    engine, t0: performance.now(), sessionId: null, mic: null, ending: false,
+    // Los AudioContext se crean dentro del click para que el navegador no los deje suspendidos.
+    // Gemini: captura a 16 kHz y reproducción a 24 kHz (formato PCM de la Live API).
+    audioCtx: engine === "gemini" ? new AudioContext({ sampleRate: 16000 }) : new AudioContext(),
+    playCtx: engine === "gemini" ? new AudioContext({ sampleRate: 24000 }) : null,
+    pc: null, dc: null, ws: null, ready: false, playHead: 0, playing: new Set(),
+    speakers: { operador: { el: null, lastEnd: -Infinity, closed: false }, cliente: { el: null, lastEnd: -Infinity, closed: false } },
+    latency: { micLastActive: -Infinity, remoteLastActive: -Infinity, samples: [] },
+  };
+
+  try {
+    call.mic = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+
+    setStatus("Creando sesión…");
+    const session = await apiJson("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ engine }),
+    });
+    call.sessionId = session.session_id;
+    log(`sesión ${session.session_id} (${session.engine}, ${session.persona})`);
+
+    setStatus("Conectando…");
+    if (engine === "openai") await connectOpenAI(); else await connectGemini();
+    hangupBtn.disabled = false;
+  } catch (err) {
+    log(String(err.message || err), true);
+    await endCall(`Error: ${err.message || err}`, true);
+  }
+}
+
+async function hangUp() {
+  hangupBtn.disabled = true;
+  setStatus("Cortando…");
+  // OpenAI: cierre ordenado con session.close y esperamos session.closed (máx. 2 s).
+  if (call?.dc?.readyState === "open") {
+    call.dc.send(JSON.stringify({ type: "session.close" }));
+    setTimeout(() => endCall("Llamada finalizada."), 2000);
+  } else {
+    await endCall("Llamada finalizada.");
+  }
+}
+
+async function endCall(message, isError = false) {
+  if (!call || call.ending) return;
+  call.ending = true;
+  const { pc, ws, mic, audioCtx, playCtx, sessionId } = call;
+  pc?.close();
+  if (ws && ws.readyState <= WebSocket.OPEN) ws.close(1000, "fin de llamada");
+  mic?.getTracks().forEach((t) => t.stop());
+  audioCtx?.close();
+  playCtx?.close();
+  remoteAudio.srcObject = null;
+  $("mic-level").style.width = $("remote-level").style.width = "0";
+  if (sessionId) fetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+  setStatus(message, isError);
+  hangupBtn.disabled = true;
+  callBtn.disabled = engineSelect.disabled = false;
+}
+
+// ---------------------------------------------------------------- Motor openai: WebRTC
+
+// Eventos muy frecuentes que no se muestran en el log.
+const QUIET_OPENAI_EVENTS = new Set(["session.input_transcript.delta", "session.output_transcript.delta", "session.usage.updated"]);
+
+async function connectOpenAI() {
+  const pc = new RTCPeerConnection();
+  call.pc = pc;
+  pc.ontrack = (e) => {
+    const stream = e.streams[0] || new MediaStream([e.track]);
+    remoteAudio.srcObject = stream;
+    attachMeter(call.audioCtx, call.audioCtx.createMediaStreamSource(stream), "cliente");
+  };
+  pc.onconnectionstatechange = () => {
+    log(`webrtc: ${pc.connectionState}`);
+    if (pc.connectionState === "failed") endCall("Se perdió la conexión de audio.", true);
+  };
+  call.mic.getAudioTracks().forEach((track) => pc.addTrack(track, call.mic));
+  attachMeter(call.audioCtx, call.audioCtx.createMediaStreamSource(call.mic), "operador");
+
+  // El canal de datos y sus listeners se crean antes de la oferta SDP.
+  const dc = pc.createDataChannel("oai-events");
+  call.dc = dc;
+  dc.onmessage = (e) => handleOpenAIEvent(JSON.parse(e.data));
+
+  await pc.setLocalDescription(await pc.createOffer());
+  await waitForIceGathering(pc, 1500);
+
+  const resp = await fetch(`/api/sessions/${call.sessionId}/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body: pc.localDescription.sdp,
+  });
+  if (!resp.ok) throw new Error(await errorDetail(resp));
+  await pc.setRemoteDescription({ type: "answer", sdp: await resp.text() });
+}
+
+function handleOpenAIEvent(ev) {
+  if (!QUIET_OPENAI_EVENTS.has(ev.type)) log(ev.type + (ev.reason ? ` (${ev.reason})` : ""), ev.type === "error");
+
+  switch (ev.type) {
+    case "session.started":
+      onCallStarted();
+      break;
+    case "session.input_transcript.delta":
+      appendTranscript("operador", ev.delta, ev.start_ms, ev.end_ms);
+      break;
+    case "session.output_transcript.delta":
+      appendTranscript("cliente", ev.delta, ev.start_ms, ev.end_ms);
+      break;
+    case "session.delegation.created":
+      log("La clienta intentó delegar una tarea (no debería pasar).", true);
+      break;
+    case "error":
+      log(JSON.stringify(ev.error), true);
+      break;
+    case "session.closed":
+      endCall(`Llamada finalizada (${ev.reason}).`);
+      break;
+  }
+}
+
+function waitForIceGathering(pc, timeoutMs) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { pc.removeEventListener("icegatheringstatechange", check); resolve(); };
+    const check = () => { if (pc.iceGatheringState === "complete") done(); };
+    pc.addEventListener("icegatheringstatechange", check);
+    setTimeout(done, timeoutMs);
+  });
+}
+
+// ---------------------------------------------------------------- Motor gemini: WebSocket + PCM
+
+// Convierte el audio del micrófono a PCM16 y lo entrega en bloques de 512 muestras (32 ms a 16 kHz).
+const CAPTURE_WORKLET = `
+class PcmCapture extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Int16Array(512); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++) {
+      const s = Math.max(-1, Math.min(1, ch[i]));
+      this.buf[this.n++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      if (this.n === this.buf.length) {
+        this.port.postMessage(this.buf.buffer, [this.buf.buffer]);
+        this.buf = new Int16Array(512);
+        this.n = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("pcm-capture", PcmCapture);`;
+
+async function connectGemini() {
+  const info = await apiJson(`/api/sessions/${call.sessionId}/token`, { method: "POST" });
+
+  // Captura: micrófono -> worklet PCM16 -> WebSocket.
+  const ctx = call.audioCtx;
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: "text/javascript" })));
+  const micSource = ctx.createMediaStreamSource(call.mic);
+  const capture = new AudioWorkletNode(ctx, "pcm-capture");
+  const sink = ctx.createGain();
+  sink.gain.value = 0; // el worklet tiene que estar conectado al destino para procesar
+  micSource.connect(capture).connect(sink).connect(ctx.destination);
+  attachMeter(ctx, micSource, "operador");
+
+  // Reproducción: bloques PCM agendados uno detrás de otro.
+  call.playOut = call.playCtx.createGain();
+  call.playOut.connect(call.playCtx.destination);
+  attachMeter(call.playCtx, call.playOut, "cliente");
+
+  // El navegador no puede mandar headers en un WebSocket: el token efímero va como query param.
+  const ws = new WebSocket(`${info.ws_url}?access_token=${encodeURIComponent(info.token)}`);
+  ws.binaryType = "arraybuffer";
+  call.ws = ws;
+  const decoder = new TextDecoder();
+  ws.onopen = () => ws.send(JSON.stringify(info.setup));
+  ws.onmessage = (e) => handleGeminiMessage(JSON.parse(typeof e.data === "string" ? e.data : decoder.decode(e.data)));
+  ws.onclose = (e) => {
+    log(`websocket cerrado (${e.code}${e.reason ? ": " + e.reason : ""})`, e.code !== 1000);
+    endCall(e.code === 1000 ? "Llamada finalizada." : `Gemini cerró la conexión (${e.code}${e.reason ? ": " + e.reason : ""}).`, e.code !== 1000);
+  };
+
+  capture.port.onmessage = (e) => {
+    if (!call.ready || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ realtimeInput: { audio: { data: toBase64(e.data), mimeType: "audio/pcm;rate=16000" } } }));
+  };
+}
+
+function handleGeminiMessage(msg) {
+  if (msg.setupComplete) {
+    log("setupComplete");
+    call.ready = true;
+    onCallStarted();
+    return;
+  }
+  const content = msg.serverContent;
+  if (content) {
+    if (content.interrupted) {
+      log("interrupted: el operador interrumpió a la clienta");
+      stopPlayback();
+      closeTurns();
+    }
+    for (const part of content.modelTurn?.parts ?? []) {
+      if (part.inlineData?.data) playPcm(part.inlineData.data, part.inlineData.mimeType);
+    }
+    if (content.inputTranscription?.text) appendTranscript("operador", content.inputTranscription.text);
+    if (content.outputTranscription?.text) appendTranscript("cliente", content.outputTranscription.text);
+    if (content.turnComplete) closeTurns();
+  }
+  if (msg.goAway) log(`goAway: Gemini va a cerrar la sesión (quedan ${msg.goAway.timeLeft})`, true);
+}
+
+function playPcm(base64, mimeType) {
+  const rate = Number(/rate=(\d+)/.exec(mimeType || "")?.[1] || 24000);
+  const pcm = fromBase64(base64);
+  const ctx = call.playCtx;
+  const buffer = ctx.createBuffer(1, pcm.length, rate);
+  const channel = buffer.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 32768;
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(call.playOut);
+  // Pequeño colchón al empezar cada respuesta para absorber variaciones de red.
+  if (call.playHead < ctx.currentTime) call.playHead = ctx.currentTime + 0.04;
+  source.start(call.playHead);
+  call.playHead += buffer.duration;
+  call.playing.add(source);
+  source.onended = () => call.playing.delete(source);
+}
+
+function stopPlayback() {
+  for (const source of call.playing) { try { source.stop(); } catch {} }
+  call.playing.clear();
+  call.playHead = 0;
+}
+
+function toBase64(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+function fromBase64(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Int16Array(bytes.buffer);
+}
+
+// ---------------------------------------------------------------- Inicio
+
+async function loadEngines() {
+  try {
+    const health = await apiJson("/health");
+    for (const [engine, info] of Object.entries(health.engines)) {
+      const option = new Option(`${ENGINE_NAMES[engine] || engine} (${info.model} · ${info.voice})`, engine);
+      option.selected = engine === health.default_engine;
+      engineSelect.append(option);
+    }
+    callBtn.disabled = false;
+    setStatus("Listo.");
+  } catch (err) {
+    setStatus(`No se pudo leer /health: ${err.message || err}`, true);
+  }
+}
+
+callBtn.disabled = true;
+callBtn.onclick = startCall;
+hangupBtn.onclick = hangUp;
+window.addEventListener("beforeunload", () => {
+  if (call && !call.ending && call.dc?.readyState === "open") call.dc.send(JSON.stringify({ type: "session.close" }));
+});
+loadEngines();
+</script>
+</body>
+</html>
